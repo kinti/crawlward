@@ -1,0 +1,8 @@
+node_modules/
+*.log
+*.log.gz
+!test/fixtures/*.log
+.DS_Store
+coverage/
+reports/
+.playwright-mcp/

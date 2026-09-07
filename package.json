@@ -1,0 +1,38 @@
+{
+  "name": "crawlward",
+  "version": "0.1.0",
+  "description": "Watchdog for AI crawlers at your own origin — access-log analyzer for Caddy/nginx.",
+  "type": "module",
+  "bin": { "crawlward": "src/analyze.mjs" },
+  "scripts": {
+    "test": "node --test",
+    "analyze": "node src/analyze.mjs"
+  },
+  "files": [
+    "src",
+    "registry",
+    "docs",
+    "caddy",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ai-crawlers",
+    "robots-txt",
+    "access-logs",
+    "caddy",
+    "nginx",
+    "log-analyzer",
+    "gptbot",
+    "claudebot"
+  ],
+  "engines": { "node": ">=18" },
+  "license": "MIT",
+  "author": "Jesús Quintana",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kinti/crawlward.git"
+  },
+  "bugs": "https://github.com/kinti/crawlward/issues",
+  "homepage": "https://github.com/kinti/crawlward#readme"
+}

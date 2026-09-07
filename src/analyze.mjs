@@ -1,0 +1,421 @@
+#!/usr/bin/env node
+// crawlward — watchdog for AI crawlers at your own origin.
+// Classifies AI crawler traffic from JSONL access logs (Caddy `format json`,
+// nginx `log_format ... escape=json`). Zero dependencies. Node >= 18.
+
+import { createReadStream, readFileSync } from 'node:fs';
+import { createGunzip } from 'node:zlib';
+import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
+
+const VERSION = '0.1.0';
+const REGISTRY_URL = new URL('../registry/crawlers.json', import.meta.url);
+const BOTLIKE = /(bot|crawler|spider|slurp|scrap|fetcher)/i;
+const MAX_TRACKED_PATHS = 5000;
+
+export function loadRegistry() {
+  const raw = JSON.parse(readFileSync(REGISTRY_URL, 'utf8'));
+  return raw.crawlers ?? [];
+}
+
+// Longest token first, so `GoogleOther-Image` wins over `GoogleOther`.
+// Matching is case-insensitive: Meta's wire UA strings are lowercase
+// (meta-externalagent/1.1) while docs often print Meta-ExternalAgent.
+export function compileMatchers(registry) {
+  return [...registry]
+    .map((c) => ({ ...c, _lc: c.token.toLowerCase() }))
+    .sort((a, b) => b._lc.length - a._lc.length);
+}
+
+export function classifyUA(ua, matchers) {
+  if (!ua) return null;
+  const lc = ua.toLowerCase();
+  for (const c of matchers) {
+    if (lc.includes(c._lc)) return c;
+  }
+  return null;
+}
+
+function pickHeader(headers, name) {
+  if (!headers) return '';
+  const v = headers[name] ?? headers[name.toLowerCase()];
+  return Array.isArray(v) ? (v[0] ?? '') : typeof v === 'string' ? v : '';
+}
+
+function toInt(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+const MONTHS = {
+  Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+  Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
+};
+
+function epochSeconds(n) {
+  return n > 1e12 ? n / 1000 : n;
+}
+
+function parseTs(raw) {
+  if (raw.msec !== undefined) {
+    const n = parseFloat(raw.msec);
+    return Number.isFinite(n) ? n : null;
+  }
+  if (typeof raw.timestamp === 'number') return epochSeconds(raw.timestamp);
+  if (typeof raw.time === 'number') return epochSeconds(raw.time);
+  if (typeof raw.time === 'string' && raw.time) {
+    const d = Date.parse(raw.time);
+    return Number.isNaN(d) ? null : d / 1000;
+  }
+  if (typeof raw.time_local === 'string') {
+    const m = /^(\d{1,2})\/([A-Za-z]{3})\/(\d{4}):(\d{2}):(\d{2}):(\d{2})\s*([+-]\d{4})?$/.exec(raw.time_local);
+    if (m && MONTHS[m[2]] !== undefined) {
+      const tz = m[7] ?? '+0000';
+      const offset = (Number(tz.slice(1, 3)) * 60 + Number(tz.slice(3))) * (tz[0] === '-' ? -1 : 1) * 60000;
+      const ms = Date.UTC(+m[3], MONTHS[m[2]], +m[1], +m[4], +m[5], +m[6]) - offset;
+      return Number.isNaN(ms) ? null : ms / 1000;
+    }
+  }
+  return null;
+}
+
+// Accepts one JSONL record and maps it to a common shape. Understands the
+// Caddy `format json` shape and common nginx JSON log formats.
+export function normalizeEvent(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+  if (raw.req && typeof raw.req === 'object') {
+    const req = raw.req;
+    return {
+      ts: typeof raw.ts === 'number' ? raw.ts : null,
+      host: req.host || '(unknown)',
+      method: req.method || '',
+      uri: req.uri || '',
+      status: Number.isFinite(raw.status) ? raw.status : toInt(raw.status) || null,
+      size: toInt(raw.size),
+      ua: pickHeader(req.headers, 'User-Agent'),
+      format: 'caddy',
+    };
+  }
+
+  const ua = raw.http_user_agent ?? raw.user_agent ?? raw.ua;
+  if (ua === undefined && raw.request === undefined && raw.status === undefined) return null;
+
+  let method = raw.method || '';
+  let uri = raw.uri || raw.request_uri || '';
+  if ((!method || !uri) && typeof raw.request === 'string') {
+    const parts = raw.request.split(' ');
+    if (parts.length >= 2) {
+      method = method || parts[0];
+      uri = uri || parts[1];
+    }
+  }
+
+  return {
+    ts: parseTs(raw),
+    host: raw.server_name || raw.host || raw.hostname || '(unknown)',
+    method,
+    uri,
+    status: toInt(raw.status) || null,
+    size: toInt(raw.body_bytes_sent ?? raw.bytes_sent ?? raw.bytes),
+    ua: typeof ua === 'string' ? ua : '',
+    format: 'nginx',
+  };
+}
+
+export function createStats() {
+  return {
+    files: 0,
+    lines: 0,
+    parsed: 0,
+    unparsed: 0,
+    aiRequests: 0,
+    aiBytes: 0,
+    bots: new Map(),   // token -> per-bot aggregate
+    unmatched: new Map(), // ua -> { requests, hosts:Set }
+  };
+}
+
+function dayOf(ts) {
+  return new Date(ts * 1000).toISOString().slice(0, 10);
+}
+
+function addBounded(map, key) {
+  if (map.has(key) || map.size < MAX_TRACKED_PATHS) {
+    map.set(key, (map.get(key) ?? 0) + 1);
+  }
+}
+
+export function ingestEvent(stats, ev, matchers) {
+  const c = classifyUA(ev.ua, matchers);
+  if (!c) {
+    if (ev.ua && BOTLIKE.test(ev.ua)) {
+      let u = stats.unmatched.get(ev.ua);
+      if (!u) {
+        u = { requests: 0, hosts: new Set() };
+        stats.unmatched.set(ev.ua, u);
+      }
+      u.requests++;
+      if (ev.host) u.hosts.add(ev.host);
+    }
+    return false;
+  }
+
+  let b = stats.bots.get(c.token);
+  if (!b) {
+    b = {
+      token: c.token,
+      vendor: c.vendor,
+      purpose: c.purpose ?? '',
+      doc: c.doc ?? '',
+      requests: 0,
+      bytes: 0,
+      hosts: new Set(),
+      days: new Set(),
+      statuses: new Map(),
+      paths: new Map(),
+      robots: 0,
+    };
+    stats.bots.set(c.token, b);
+  }
+  b.requests++;
+  stats.aiRequests++;
+  stats.aiBytes += ev.size;
+  b.bytes += ev.size;
+  if (ev.host) b.hosts.add(ev.host);
+  if (ev.ts) b.days.add(dayOf(ev.ts));
+  const st = ev.status ?? 'n/a';
+  b.statuses.set(st, (b.statuses.get(st) ?? 0) + 1);
+  if (ev.uri) addBounded(b.paths, ev.uri);
+  if (ev.uri === '/robots.txt') b.robots++;
+  return true;
+}
+
+async function* jsonLines(path) {
+  const input = createReadStream(path);
+  const stream = path.endsWith('.gz') ? input.pipe(createGunzip()) : input;
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  for await (const line of rl) yield line;
+}
+
+export async function analyzeFiles(files, matchers, stats = createStats()) {
+  const failed = [];
+  for (const f of files) {
+    stats.files++;
+    try {
+      for await (const line of jsonLines(f)) {
+        if (!line.trim()) continue;
+        stats.lines++;
+        let ev = null;
+        try {
+          ev = normalizeEvent(JSON.parse(line));
+        } catch {
+          /* fall through */
+        }
+        if (!ev) {
+          stats.unparsed++;
+          continue;
+        }
+        stats.parsed++;
+        ingestEvent(stats, ev, matchers);
+      }
+    } catch (err) {
+      failed.push({ file: f, error: err.message });
+    }
+  }
+  return { stats, failed };
+}
+
+// ---- reporting ------------------------------------------------------------
+
+function fmtInt(n) {
+  return n.toLocaleString('en-US');
+}
+
+function fmtMB(bytes) {
+  if (bytes < 1e6) return `${(bytes / 1e3).toFixed(0)} KB`;
+  return `${(bytes / 1e6).toFixed(2)} MB`;
+}
+
+function pct(part, whole) {
+  return whole > 0 ? `${((part / whole) * 100).toFixed(1)}%` : '—';
+}
+
+function truncate(s, n) {
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+export function buildReport(stats, { top = 15 } = {}) {
+  const bots = [...stats.bots.values()].sort((a, b) => b.requests - a.requests);
+
+  const vendors = new Map();
+  for (const b of bots) {
+    let v = vendors.get(b.vendor);
+    if (!v) {
+      v = { vendor: b.vendor, requests: 0, bytes: 0, tokens: [] };
+      vendors.set(b.vendor, v);
+    }
+    v.requests += b.requests;
+    v.bytes += b.bytes;
+    v.tokens.push(b.token);
+  }
+
+  const statusTotals = new Map();
+  const pathTotals = new Map();
+  for (const b of bots) {
+    for (const [s, n] of b.statuses) statusTotals.set(s, (statusTotals.get(s) ?? 0) + n);
+    for (const [p, n] of b.paths) pathTotals.set(p, (pathTotals.get(p) ?? 0) + n);
+  }
+
+  return {
+    meta: {
+      tool: 'crawlward',
+      version: VERSION,
+      generated: new Date().toISOString(),
+      files: stats.files,
+      lines: stats.lines,
+      parsed: stats.parsed,
+      unparsed: stats.unparsed,
+      aiRequests: stats.aiRequests,
+      aiBytes: stats.aiBytes,
+      aiShare: stats.parsed > 0 ? stats.aiRequests / stats.parsed : 0,
+    },
+    byBot: bots.map((b) => ({
+      token: b.token,
+      vendor: b.vendor,
+      purpose: b.purpose,
+      requests: b.requests,
+      bytes: b.bytes,
+      hosts: b.hosts.size,
+      days: b.days.size,
+      robotsTxtFetches: b.robots,
+      statuses: Object.fromEntries([...b.statuses.entries()].sort()),
+      topPaths: [...b.paths.entries()].sort((a, z) => z[1] - a[1]).slice(0, top).map(([path, count]) => ({ path, count })),
+    })),
+    byVendor: [...vendors.values()].sort((a, b) => b.requests - a.requests),
+    topPaths: [...pathTotals.entries()].sort((a, z) => z[1] - a[1]).slice(0, top).map(([path, count]) => ({ path, count })),
+    statuses: Object.fromEntries([...statusTotals.entries()].sort()),
+    robotsFetchers: bots.filter((b) => b.robots > 0).map((b) => ({ token: b.token, fetches: b.robots })),
+    unmatchedBots: [...stats.unmatched.entries()]
+      .sort((a, z) => z[1].requests - a[1].requests)
+      .slice(0, top)
+      .map(([ua, u]) => ({ ua, requests: u.requests, hosts: u.hosts.size })),
+  };
+}
+
+export function renderReport(report, { top = 15 } = {}) {
+  const { meta } = report;
+  const out = [];
+  out.push(`# crawlward v${VERSION} — who really crawls`);
+  out.push(
+    `files: ${meta.files} · lines: ${fmtInt(meta.lines)} · parsed: ${fmtInt(meta.parsed)} · unparsed: ${fmtInt(meta.unparsed)}`,
+  );
+  out.push(
+    `AI-crawler requests: ${fmtInt(meta.aiRequests)} (${pct(meta.aiRequests, meta.parsed)} of parsed) · ${fmtMB(meta.aiBytes)} served\n`,
+  );
+
+  if (report.byBot.length === 0) {
+    out.push('(no AI crawler traffic found — that is a finding too, given registry coverage)');
+    return out.join('\n');
+  }
+
+  out.push('## AI crawler requests, by bot');
+  out.push('requests  share  served   days  hosts  bot · vendor — purpose');
+  for (const b of report.byBot.slice(0, top)) {
+    out.push(
+      `${fmtInt(b.requests).padStart(8)}  ${pct(b.requests, meta.aiRequests).padStart(6)}  ${fmtMB(b.bytes).padStart(7)}  ${String(b.days).padStart(4)}  ${String(b.hosts).padStart(5)}  ${b.token} · ${b.vendor} — ${b.purpose}`,
+    );
+  }
+
+  out.push('\n## By vendor');
+  for (const v of report.byVendor.slice(0, top)) {
+    out.push(`${fmtInt(v.requests).padStart(8)}  ${fmtMB(v.bytes).padStart(7)}  ${v.vendor} (${v.tokens.join(', ')})`);
+  }
+
+  if (report.topPaths.length > 0) {
+    out.push('\n## What AI crawlers want most (top paths)');
+    for (const p of report.topPaths) {
+      out.push(`${fmtInt(p.count).padStart(8)}  ${truncate(p.path, 90)}`);
+    }
+  }
+
+  const statusParts = Object.entries(report.statuses).map(([s, n]) => `${s}: ${fmtInt(n)}`);
+  out.push(`\n## HTTP status of AI crawler requests`);
+  out.push(statusParts.join(' · '));
+  const err = Object.entries(report.statuses)
+    .filter(([s]) => s.startsWith('4') || s.startsWith('5'))
+    .reduce((acc, [, n]) => acc + n, 0);
+  if (err > 0) out.push(`(error responses: ${fmtInt(err)} — 404/410/403 waves often mean probing or stale caches)`);
+
+  if (report.robotsFetchers.length > 0) {
+    out.push('\n## robots.txt awareness');
+    for (const r of report.robotsFetchers) {
+      out.push(`${r.token} requested /robots.txt ${fmtInt(r.fetches)}×`);
+    }
+    const noRobots = report.byBot.filter((b) => b.robotsTxtFetches === 0).map((b) => b.token);
+    if (noRobots.length > 0) out.push(`no /robots.txt request seen from: ${noRobots.join(', ')} (weak signal — crawlers may cache it)`);
+  }
+
+  if (report.unmatchedBots.length > 0) {
+    out.push('\n## Bot-like user agents NOT in the registry');
+    for (const u of report.unmatchedBots) {
+      out.push(`${fmtInt(u.requests).padStart(8)}  ${truncate(u.ua, 100)}`);
+    }
+    out.push('(candidates for the registry — verify identity before adding)');
+  }
+
+  return out.join('\n');
+}
+
+// ---- CLI ------------------------------------------------------------------
+
+function printHelp() {
+  console.log(`crawlward v${VERSION} — watchdog for AI crawlers at your own origin
+
+Usage:
+  crawlward [options] <access.log> [<more.log> ...]
+
+Options:
+  --json          emit a machine-readable JSON report instead of tables
+  --top <n>       rows per table (default: 15)
+  -h, --help      show this help
+  -V, --version   show version
+
+Input: JSONL access logs from Caddy (log { format json }) or nginx
+(log_format ... escape=json). Plain and gzip-compressed (.gz) files work.
+Zero dependencies.`);
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  let json = false;
+  let top = 15;
+  const files = [];
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--json') json = true;
+    else if (a === '--top') top = Number(argv[++i]) || 15;
+    else if (a.startsWith('--top=')) top = Number(a.slice(6)) || 15;
+    else if (a === '-h' || a === '--help') { printHelp(); return; }
+    else if (a === '-V' || a === '--version') { console.log(VERSION); return; }
+    else files.push(a);
+  }
+
+  if (files.length === 0) {
+    printHelp();
+    process.exit(1);
+  }
+
+  const matchers = compileMatchers(loadRegistry());
+  const { stats, failed } = await analyzeFiles(files, matchers);
+  const report = buildReport(stats, { top });
+
+  for (const f of failed) console.error(`crawlward: cannot read ${f.file}: ${f.error}`);
+  console.log(json ? JSON.stringify(report, null, 2) : renderReport(report, { top }));
+  if (failed.length > 0) process.exit(2);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

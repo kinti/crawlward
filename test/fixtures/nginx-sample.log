@@ -1,0 +1,2 @@
+{"time_local":"07/Sep/2026:10:00:00 +0000","remote_addr":"203.0.113.30","request":"GET / HTTP/1.1","status":"200","body_bytes_sent":"2048","http_user_agent":"Mozilla/5.0 (compatible; OAI-SearchBot/1.1; +https://openai.com/searchbot)","server_name":"example.net"}
+{"time_local":"07/Sep/2026:10:00:10 +0000","remote_addr":"203.0.113.30","request":"GET /pricing HTTP/1.1","status":"200","body_bytes_sent":"8192","http_user_agent":"Mozilla/5.0 (compatible; OAI-SearchBot/1.1; +https://openai.com/searchbot)","server_name":"example.net"}
