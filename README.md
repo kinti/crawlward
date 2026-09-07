@@ -1,5 +1,11 @@
 # crawlward
 
+[![CI](https://github.com/kinti/crawlward/actions/workflows/ci.yml/badge.svg)](https://github.com/kinti/crawlward/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Node](https://img.shields.io/badge/node-%E2%89%A518-brightgreen)
+![dependencies](https://img.shields.io/badge/dependencies-0-success)
+[![GitHub release](https://img.shields.io/github/v/release/kinti/crawlward)](https://github.com/kinti/crawlward/releases)
+
 **A watchdog for AI crawlers at your own origin — for everyone NOT on Cloudflare.**
 
 Cloudflare launched pay-per-crawl and permission-by-default for AI crawlers.
@@ -113,7 +119,7 @@ official documentation URL in the PR.
 
 ## Status
 
-v0.1.0 — young but tested (13 test cases, CI on Node 18/20/22). The
+v0.1.0 — young but tested (14 test cases, CI on Node 18/20/22). The
 signature registry is verified against vendor documentation as of
 September 2026; vendors rename and add bots often, so issues and PRs are
 the maintenance model.

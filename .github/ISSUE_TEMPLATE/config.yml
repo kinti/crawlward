@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions & ideas
+    url: https://github.com/kinti/crawlward/discussions
+    about: Open a discussion for usage questions or feature ideas before filing an issue.

@@ -1,0 +1,40 @@
+name: Bug report
+description: Something in crawlward behaves wrong or crashes
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Include the exact command you ran and the unexpected output.
+      placeholder: crawlward access.log → …
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      description: Output of `node --version`
+      placeholder: v22.11.0
+    validations:
+      required: true
+  - type: dropdown
+    id: log-source
+    attributes:
+      label: Log source
+      options:
+        - Caddy (format json)
+        - nginx (log_format ... escape=json)
+        - another JSON log format
+    validations:
+      required: true
+  - type: textarea
+    id: sample-line
+    attributes:
+      label: Sample log line
+      description: One line that reproduces the problem. Redact IPs and anything private.
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything else?

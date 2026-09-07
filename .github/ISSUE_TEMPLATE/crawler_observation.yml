@@ -1,0 +1,40 @@
+name: Crawler observation
+description: Report a real-world AI-crawler finding — new bot, unexpected behavior, robots.txt non-compliance
+labels: [observation]
+body:
+  - type: textarea
+    id: finding
+    attributes:
+      label: What did you observe?
+      description: The finding in one or two sentences.
+      placeholder: A bot claiming to be X hit 4,000 URLs in an hour and never fetched /robots.txt
+    validations:
+      required: true
+  - type: textarea
+    id: ua
+    attributes:
+      label: User-Agent string(s)
+      description: Exact UA string(s) from your logs. Redact anything that isn't just the UA.
+      placeholder: Mozilla/5.0 (compatible; SomeBot/1.0; +https://example.com/bot)
+    validations:
+      required: true
+  - type: input
+    id: official-doc
+    attributes:
+      label: Official documentation URL (if any)
+      description: The vendor's own crawler/bots page, if one exists. Leave empty if none — that itself is a finding.
+  - type: checkboxes
+    id: behavior
+    attributes:
+      label: Observed behavior
+      options:
+        - label: Fetched /robots.txt
+        - label: Ignored robots.txt disallow rules
+        - label: High request rate / aggressive crawling
+        - label: Claimed a known vendor identity (GPTBot, ClaudeBot, …)
+        - label: Hit error pages / probing (404s, scan patterns)
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Site type, rough traffic level, dates. No need to identify the site if you prefer not to.
