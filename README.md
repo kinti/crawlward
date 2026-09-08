@@ -18,15 +18,18 @@ Caddy, nginx, cheap shared hosting — has no simple answer to:
 
 crawlward answers those from data you already have: your access logs.
 
-- **Classifies** requests from known AI crawlers (GPTBot, ClaudeBot,
+- **Classifies** requests from 39 known AI crawlers (GPTBot, ClaudeBot,
   PerplexityBot, Bytespider, CCBot…) using a signature registry with
   sources in [`registry/crawlers.json`](registry/crawlers.json)
+- **Verifies identities** (`--verify`): checks that requests claiming to be
+  GPTBot etc. actually come from the vendor's published IP ranges — spoofed
+  bot identities get caught
 - **Aggregates** per bot / vendor / host / day: requests, bandwidth, top
-  paths, HTTP status mix, robots.txt awareness
+  paths, HTTP status mix, peak requests/hour, robots.txt awareness
 - **Flags** bot-like user agents that match no known signature — candidates
   for the registry, and often the most interesting finding
 - **Zero dependencies.** One CLI, Node ≥ 18. Reads Caddy and nginx JSON
-  access logs, plain or gzipped
+  access logs and Apache combined logs, plain or gzipped
 
 ## Quick start
 
@@ -46,43 +49,52 @@ Machine-readable output for pipelines and dashboards:
 
 ```sh
 node src/analyze.mjs --json access.log > report.json
+node src/analyze.mjs --csv access.log > bots.csv
+```
+
+Narrow the window, and verify that claimed identities are real:
+
+```sh
+node src/analyze.mjs --since 2026-09-01 --verify /var/log/caddy/*.log
 ```
 
 ## Example output
 
 ```
-# crawlward v0.1.0 — who really crawls
-files: 2 · lines: 11 · parsed: 10 · unparsed: 1
-AI-crawler requests: 8 (80.0% of parsed) · 161 KB served
+# crawlward v0.2.0 — who really crawls
+files: 3 · lines: 14 · parsed: 13 · unparsed: 1
+AI-crawler requests: 10 (76.9% of parsed) · 187 KB served
 
 ## AI crawler requests, by bot
-requests  share  served   days  hosts  bot · vendor — purpose
-       3   37.5%   100 KB     2      1  GPTBot · OpenAI — training
-       2   25.0%    10 KB     1      1  OAI-SearchBot · OpenAI — search index
-       1   12.5%     0 KB     1      1  ClaudeBot · Anthropic — training
+requests  share  served   days  peak/h  bot · vendor — purpose
+       3   30.0%   100 KB     2       2  GPTBot · OpenAI — model training
+       2   20.0%    10 KB     1       2  OAI-SearchBot · OpenAI — ChatGPT search index
 
-## What AI crawlers want most (top paths)
-       2  /
-       1  /robots.txt
-       1  /posts/hello-world
-
-## robots.txt awareness
-GPTBot requested /robots.txt 1×
-no /robots.txt request seen from: OAI-SearchBot, ClaudeBot (weak signal — crawlers may cache it)
+## HTTP status of AI crawler requests
+200: 9 · 404: 1
 
 ## Bot-like user agents NOT in the registry
        1  Scrapy/2.11 (+https://scrapy.org)
+
+## Identity verification (--verify: claimed identity vs vendor IP ranges)
+GPTBot                 1/1 source IP(s) OUTSIDE vendor ranges (21 prefixes) — treat claimed identity as spoofed
+                       outside IP sample: 203.0.113.20
+CCBot                  all 1 source IP(s) inside vendor ranges (5 prefixes) — identity consistent
+Bytespider             vendor publishes no IP ranges — cannot verify
 ```
 
 ## 1. Turn on JSON access logs
 
-crawlward reads JSONL access logs. Ten minutes of setup:
+crawlward reads JSONL access logs and Apache combined logs. Ten minutes of
+setup:
 
 - **Caddy**: [`caddy/README.md`](caddy/README.md) — `log { format json }` + rotation
 - **nginx**: [`docs/nginx.md`](docs/nginx.md) — `log_format ... escape=json` + logrotate
+- **Apache**: combined format works as-is, no config needed (client IP feeds
+  `--verify`; for Caddy/nginx JSON it comes from `remote_ip`/`$remote_addr`)
 
-The analyzer auto-detects both shapes (and common variants), tolerates
-broken lines, and never needs the whole file in memory.
+The analyzer auto-detects the format per line, tolerates broken lines, and
+never needs the whole file in memory.
 
 ## The registry
 
@@ -91,35 +103,45 @@ source of truth; [`docs/crawlers.md`](docs/crawlers.md) is the annotated
 view with official documentation links and verification notes.
 
 **Honest caveat:** a User-Agent string is free text. Anyone can claim to be
-`GPTBot`. crawlward tells you *what claims to be* crawling you — not
-cryptographic proof of identity. Verifying claimed identities via
-reverse DNS (OpenAI, Anthropic and Perplexity publish IP ranges / verification
-endpoints) is the top roadmap item.
+`GPTBot`. That's why `--verify` exists: it checks the source IPs of
+claimed-bot requests against the vendor's own published IP prefix lists
+(OpenAI, Anthropic, Perplexity, Common Crawl and Mistral publish them). A
+100% match means the identity is consistent with vendor infrastructure; a
+0% match means you're almost certainly looking at a spoofed identity.
 
 ## Reading the report — known traps
 
-1. **UA strings are claims, not identity.** Treat registry hits as
-   self-declared until reverse-DNS verification lands.
+1. **UA strings are claims; `--verify` checks them.** IP-prefix matching
+   confirms the requests come from vendor infrastructure. It can still miss
+   brand-new ranges (vendors add IPs constantly) — a MIXED result usually
+   means new ranges, not fraud. Reverse-DNS (FCrDNS) is a useful complement
+   for vendors that don't publish lists.
 2. **robots.txt respect ≠ permission respect.** A bot can fetch `/robots.txt`
    once, cache it for weeks, and still be a good citizen — or ignore it
-   silently. crawlward reports the signal; you judge the behavior.
+   silently. User-triggered fetchers (ChatGPT-User, Perplexity-User,
+   meta-externalfetcher, Google-Agent…) bypass robots.txt by design.
+   crawlward reports the signal; you judge the behavior.
 3. **Absence of evidence isn't evidence of absence.** Zero hits from a vendor
    doesn't mean zero crawling: content can reach models via Common Crawl or
    client-side aggregators.
+4. **`Google-Extended` will never appear in your logs.** It's a robots.txt
+   control token with no HTTP user-agent of its own. Any report claiming
+   "Google-Extended requests" is wrong.
 
 ## Roadmap
 
-- [ ] Reverse-DNS verification of claimed crawler identities
+- [x] Identity verification against vendor-published IP ranges (`--verify`)
 - [ ] robots.txt diffing: what *you* allow vs what *they* do
 - [ ] HTML report output
-- [ ] More log formats (Apache combined, Traefik, Caddy `console` format)
+- [ ] More log formats (Traefik, Caddy `console` format)
+- [ ] FCrDNS verification as complement for vendors without prefix lists
 
 Registry additions and fixes are very welcome — please include the vendor's
 official documentation URL in the PR.
 
 ## Status
 
-v0.1.0 — young but tested (14 test cases, CI on Node 18/20/22). The
+v0.2.0 — young but tested (27 test cases, CI on Node 18/20/22). The
 signature registry is verified against vendor documentation as of
 September 2026; vendors rename and add bots often, so issues and PRs are
 the maintenance model.

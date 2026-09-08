@@ -35,6 +35,10 @@ Rules for registry PRs:
    `controlTokens`, not `crawlers`.
 5. Include a line from your own access logs (UA string only, redact IPs) if
    you're adding a bot you actually observed.
+6. If the vendor publishes an official IP-prefix list (Google-cloud-style
+   `{prefixes:[{ipv4Prefix|ipv6Prefix}]}` JSON), add its URL as `ranges` —
+   it powers `crawlward --verify`. See the list in
+   [`docs/crawlers.md`](../docs/crawlers.md).
 
 ## Reporting findings
 

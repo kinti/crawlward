@@ -107,6 +107,31 @@ docs headings print them capitalized. crawlward matches case-insensitively.
 |---|---|
 | `cohere-ai` | Cohere's crawler page (2026-09-07) states they do not currently crawl web content to train generative AI; the token is retired. |
 
+## Identity verification files
+
+These vendors publish official IP-prefix lists (Google-cloud-style
+`{prefixes: [{ipv4Prefix|ipv6Prefix}]}` JSON). `crawlward --verify` fetches
+them and checks whether requests claiming each identity come from that
+vendor's infrastructure. The URLs live in the `ranges` field of
+[`registry/crawlers.json`](../registry/crawlers.json).
+
+| Bots covered | Prefix list |
+|---|---|
+| GPTBot | <https://openai.com/gptbot.json> |
+| OAI-SearchBot | <https://openai.com/searchbot.json> |
+| ChatGPT-User | <https://openai.com/chatgpt-user.json> |
+| OAI-AdsBot | <https://openai.com/adsbot.json> |
+| ClaudeBot, Claude-User, Claude-SearchBot | <https://claude.com/crawling/bots.json> (shared list) |
+| PerplexityBot | <https://perplexity.com/perplexitybot.json> |
+| Perplexity-User | <https://perplexity.com/perplexity-user.json> |
+| CCBot | <https://index.commoncrawl.org/ccbot.json> |
+| MistralAI-User | <https://mistral.ai/mistralai-user-ips.json> |
+| MistralAI-Index | <https://mistral.ai/mistralai-index-ips.json> |
+
+Vendors without a machine-readable list (Amazon publishes an HTML page,
+Apple documents reverse-DNS `*.applebot.apple.com`) cannot be checked by
+`--verify` yet; FCrDNS support is on the roadmap.
+
 ## Known analysis traps
 
 1. **UA strings are claims, not identity.** Anything can claim to be

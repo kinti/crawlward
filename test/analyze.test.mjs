@@ -10,11 +10,13 @@ import {
   compileMatchers,
   classifyUA,
   normalizeEvent,
+  parseApacheLine,
   createStats,
   ingestEvent,
   analyzeFiles,
   buildReport,
   renderReport,
+  renderCsv,
 } from '../src/analyze.mjs';
 
 const registry = loadRegistry();
@@ -22,6 +24,7 @@ const matchers = compileMatchers(registry);
 
 const caddyFixture = readFileSync(new URL('./fixtures/caddy-sample.log', import.meta.url), 'utf8');
 const nginxFixture = readFileSync(new URL('./fixtures/nginx-sample.log', import.meta.url), 'utf8');
+const apacheFixture = readFileSync(new URL('./fixtures/apache-sample.log', import.meta.url), 'utf8');
 
 function ingestFixtures(stats) {
   for (const line of [...caddyFixture.split('\n'), ...nginxFixture.split('\n')]) {
@@ -176,4 +179,62 @@ test('renderReport handles a log with zero AI traffic', () => {
   stats.parsed = 5;
   const text = renderReport(buildReport(stats));
   assert.match(text, /no AI crawler traffic found/);
+});
+
+test('parseApacheLine understands combined format', () => {
+  const line = apacheFixture.split('\n')[0];
+  const ev = parseApacheLine(line);
+  assert.equal(ev.remote, '198.51.100.20'); // client IP feeds verification
+  assert.equal(ev.host, '(unknown)'); // combined format has no vhost field
+  assert.equal(ev.uri, '/');
+  assert.equal(ev.status, 200);
+  assert.equal(ev.size, 5120);
+  assert.ok(ev.ua.includes('CCBot'));
+  assert.equal(new Date(ev.ts * 1000).toISOString().slice(0, 10), '2026-09-07');
+  assert.equal(parseApacheLine('not an apache line'), null);
+});
+
+test('analyzeFiles auto-detects Apache combined logs alongside JSON', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crawlward-test-'));
+  const apache = join(dir, 'c.access.log');
+  writeFileSync(apache, apacheFixture);
+  const { stats } = await analyzeFiles([apache], matchers);
+  // 2 CCBot lines + 1 DataForSeoBot (unmatched, bot-like)
+  assert.equal(stats.parsed, 3);
+  assert.equal(stats.aiRequests, 2);
+  assert.ok(stats.unmatched.get('DataForSeoBot/1.0'));
+});
+
+test('peak request rate is computed per bot', () => {
+  const stats = createStats();
+  // 3 GPTBot requests within the same hour, one in the next hour
+  const hour = 1788739200; // 2026-09-07T00:00Z, epoch seconds
+  for (let i = 0; i < 3; i++) {
+    ingestEvent(stats, { ts: hour + i * 60, host: 'h', uri: '/x', status: 200, size: 10, ua: 'Mozilla/5.0 (compatible; GPTBot/1.2)', remote: '203.0.113.5' }, matchers);
+  }
+  ingestEvent(stats, { ts: hour + 7200, host: 'h', uri: '/y', status: 200, size: 10, ua: 'Mozilla/5.0 (compatible; GPTBot/1.2)', remote: '203.0.113.5' }, matchers);
+  const report = buildReport(stats);
+  const gpt = report.byBot[0];
+  assert.equal(gpt.requests, 4);
+  assert.equal(gpt.peakRph, 3);
+  assert.equal(gpt.distinctIps, 1);
+});
+
+test('--since/--until filters drop out-of-window events', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crawlward-test-'));
+  const f = join(dir, 'w.log');
+  // Fixture spans 2026-09-07 and 2026-09-08 (GPTBot second-post line).
+  writeFileSync(f, caddyFixture);
+  const since = Date.parse('2026-09-08T00:00:00Z') / 1000;
+  const { stats } = await analyzeFiles([f], matchers, { since });
+  assert.equal(stats.aiRequests, 1); // only the GPTBot 2026-09-08 request
+  assert.equal(stats.filtered, 7); // the other 7 parsed events are before the window
+});
+
+test('renderCsv emits a header plus one row per bot', () => {
+  const csv = renderCsv(buildReport(ingestFixtures(createStats())));
+  const lines = csv.split('\n');
+  assert.ok(lines[0].startsWith('token,vendor,purpose,requests'));
+  assert.equal(lines.length, 6); // header + 5 bots
+  assert.ok(lines.some((l) => l.startsWith('GPTBot,')));
 });

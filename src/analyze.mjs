@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // crawlward — watchdog for AI crawlers at your own origin.
 // Classifies AI crawler traffic from JSONL access logs (Caddy `format json`,
-// nginx `log_format ... escape=json`). Zero dependencies. Node >= 18.
+// nginx `log_format ... escape=json`) and Apache combined logs.
+// Zero dependencies. Node >= 18.
 
 import { createReadStream, readFileSync } from 'node:fs';
 import { createGunzip } from 'node:zlib';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import { verifyBots } from './verify.mjs';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const REGISTRY_URL = new URL('../registry/crawlers.json', import.meta.url);
 const BOTLIKE = /(bot|crawler|spider|slurp|scrap|fetcher)/i;
 const MAX_TRACKED_PATHS = 5000;
@@ -94,6 +96,7 @@ export function normalizeEvent(raw) {
       status: Number.isFinite(raw.status) ? raw.status : toInt(raw.status) || null,
       size: toInt(raw.size),
       ua: pickHeader(req.headers, 'User-Agent'),
+      remote: req.remote_ip || '',
       format: 'caddy',
     };
   }
@@ -119,7 +122,39 @@ export function normalizeEvent(raw) {
     status: toInt(raw.status) || null,
     size: toInt(raw.body_bytes_sent ?? raw.bytes_sent ?? raw.bytes),
     ua: typeof ua === 'string' ? ua : '',
+    remote: raw.remote_addr || '',
     format: 'nginx',
+  };
+}
+
+// Apache/NCSA "combined" format, still the default on many shared hosts.
+const APACHE_RE =
+  /^(\S+)\s+(\S+)\s+(\S+)\s+\[([^\]]+)\]\s+"([^"]*)"\s+(\d{3})\s+(\S+)(?:\s+"([^"]*)"\s+"([^"]*)")?/;
+
+export function parseApacheLine(line) {
+  const m = APACHE_RE.exec(line.trim());
+  if (!m) return null;
+  // In combined format the first field is the client address (there is no
+  // vhost field), so it feeds `remote` for identity verification.
+  const [, client, , , timeLocal, request, status, bytes, , ua] = m;
+  const looksIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(client) || client.includes(':');
+  let method = '';
+  let uri = '';
+  const rp = request.split(' ');
+  if (rp.length >= 2) {
+    method = rp[0];
+    uri = rp[1];
+  }
+  return {
+    ts: parseTs({ time_local: timeLocal }),
+    host: looksIp ? '(unknown)' : client === '-' ? '(unknown)' : client,
+    method,
+    uri,
+    status: Number(status),
+    size: bytes === '-' ? 0 : Number(bytes) || 0,
+    ua: ua || '',
+    remote: looksIp ? client : '',
+    format: 'apache',
   };
 }
 
@@ -129,6 +164,7 @@ export function createStats() {
     lines: 0,
     parsed: 0,
     unparsed: 0,
+    filtered: 0,
     aiRequests: 0,
     aiBytes: 0,
     bots: new Map(),   // token -> per-bot aggregate
@@ -144,6 +180,10 @@ function addBounded(map, key) {
   if (map.has(key) || map.size < MAX_TRACKED_PATHS) {
     map.set(key, (map.get(key) ?? 0) + 1);
   }
+}
+
+function addIp(set, ip) {
+  if (ip && (set.has(ip) || set.size < 50000)) set.add(ip);
 }
 
 export function ingestEvent(stats, ev, matchers) {
@@ -172,6 +212,8 @@ export function ingestEvent(stats, ev, matchers) {
       bytes: 0,
       hosts: new Set(),
       days: new Set(),
+      hours: new Map(),
+      ips: new Set(),
       statuses: new Map(),
       paths: new Map(),
       robots: 0,
@@ -183,7 +225,11 @@ export function ingestEvent(stats, ev, matchers) {
   stats.aiBytes += ev.size;
   b.bytes += ev.size;
   if (ev.host) b.hosts.add(ev.host);
-  if (ev.ts) b.days.add(dayOf(ev.ts));
+  if (ev.remote) addIp(b.ips, ev.remote);
+  if (ev.ts) {
+    b.days.add(dayOf(ev.ts));
+    addBounded(b.hours, Math.floor(ev.ts / 3600));
+  }
   const st = ev.status ?? 'n/a';
   b.statuses.set(st, (b.statuses.get(st) ?? 0) + 1);
   if (ev.uri) addBounded(b.paths, ev.uri);
@@ -198,7 +244,8 @@ async function* jsonLines(path) {
   for await (const line of rl) yield line;
 }
 
-export async function analyzeFiles(files, matchers, stats = createStats()) {
+export async function analyzeFiles(files, matchers, opts = {}) {
+  const { stats = createStats(), since = null, until = null } = opts;
   const failed = [];
   for (const f of files) {
     stats.files++;
@@ -210,11 +257,15 @@ export async function analyzeFiles(files, matchers, stats = createStats()) {
         try {
           ev = normalizeEvent(JSON.parse(line));
         } catch {
-          /* fall through */
+          ev = parseApacheLine(line);
         }
         if (!ev) {
           stats.unparsed++;
           continue;
+        }
+        if (ev.ts !== null) {
+          if (since !== null && ev.ts < since) { stats.filtered++; continue; }
+          if (until !== null && ev.ts > until) { stats.filtered++; continue; }
         }
         stats.parsed++;
         ingestEvent(stats, ev, matchers);
@@ -243,6 +294,18 @@ function pct(part, whole) {
 
 function truncate(s, n) {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+function peakRate(hoursMap) {
+  let best = 0;
+  let bucket = null;
+  for (const [h, n] of hoursMap) {
+    if (n > best) {
+      best = n;
+      bucket = h;
+    }
+  }
+  return { rph: best, hourTs: bucket === null ? null : bucket * 3600 };
 }
 
 export function buildReport(stats, { top = 15 } = {}) {
@@ -276,22 +339,29 @@ export function buildReport(stats, { top = 15 } = {}) {
       lines: stats.lines,
       parsed: stats.parsed,
       unparsed: stats.unparsed,
+      filtered: stats.filtered,
       aiRequests: stats.aiRequests,
       aiBytes: stats.aiBytes,
       aiShare: stats.parsed > 0 ? stats.aiRequests / stats.parsed : 0,
     },
-    byBot: bots.map((b) => ({
-      token: b.token,
-      vendor: b.vendor,
-      purpose: b.purpose,
-      requests: b.requests,
-      bytes: b.bytes,
-      hosts: b.hosts.size,
-      days: b.days.size,
-      robotsTxtFetches: b.robots,
-      statuses: Object.fromEntries([...b.statuses.entries()].sort()),
-      topPaths: [...b.paths.entries()].sort((a, z) => z[1] - a[1]).slice(0, top).map(([path, count]) => ({ path, count })),
-    })),
+    byBot: bots.map((b) => {
+      const peak = peakRate(b.hours);
+      return {
+        token: b.token,
+        vendor: b.vendor,
+        purpose: b.purpose,
+        requests: b.requests,
+        bytes: b.bytes,
+        hosts: b.hosts.size,
+        distinctIps: b.ips.size,
+        days: b.days.size,
+        peakRph: peak.rph,
+        peakHour: peak.hourTs === null ? null : new Date(peak.hourTs * 1000).toISOString(),
+        robotsTxtFetches: b.robots,
+        statuses: Object.fromEntries([...b.statuses.entries()].sort()),
+        topPaths: [...b.paths.entries()].sort((a, z) => z[1] - a[1]).slice(0, top).map(([path, count]) => ({ path, count })),
+      };
+    }),
     byVendor: [...vendors.values()].sort((a, b) => b.requests - a.requests),
     topPaths: [...pathTotals.entries()].sort((a, z) => z[1] - a[1]).slice(0, top).map(([path, count]) => ({ path, count })),
     statuses: Object.fromEntries([...statusTotals.entries()].sort()),
@@ -320,10 +390,10 @@ export function renderReport(report, { top = 15 } = {}) {
   }
 
   out.push('## AI crawler requests, by bot');
-  out.push('requests  share  served   days  hosts  bot · vendor — purpose');
+  out.push('requests  share  served   days  peak/h  bot · vendor — purpose');
   for (const b of report.byBot.slice(0, top)) {
     out.push(
-      `${fmtInt(b.requests).padStart(8)}  ${pct(b.requests, meta.aiRequests).padStart(6)}  ${fmtMB(b.bytes).padStart(7)}  ${String(b.days).padStart(4)}  ${String(b.hosts).padStart(5)}  ${b.token} · ${b.vendor} — ${b.purpose}`,
+      `${fmtInt(b.requests).padStart(8)}  ${pct(b.requests, meta.aiRequests).padStart(6)}  ${fmtMB(b.bytes).padStart(7)}  ${String(b.days).padStart(4)}  ${String(b.peakRph).padStart(6)}  ${b.token} · ${b.vendor} — ${b.purpose}`,
     );
   }
 
@@ -364,7 +434,42 @@ export function renderReport(report, { top = 15 } = {}) {
     out.push('(candidates for the registry — verify identity before adding)');
   }
 
+  if (report.verification && report.verification.length > 0) {
+    out.push('\n## Identity verification (--verify: claimed identity vs vendor IP ranges)');
+    for (const v of report.verification) {
+      if (v.status === 'no-ranges') {
+        out.push(`${v.token.padEnd(22)} vendor publishes no IP ranges — cannot verify`);
+      } else if (v.status === 'unavailable') {
+        out.push(`${v.token.padEnd(22)} ranges unavailable (${v.error})`);
+      } else if (v.share === 1) {
+        out.push(`${v.token.padEnd(22)} all ${fmtInt(v.uniqueIps)} source IP(s) inside vendor ranges (${v.prefixes} prefixes) — identity consistent`);
+      } else if (v.share === 0) {
+        out.push(`${v.token.padEnd(22)} ${fmtInt(v.uniqueIps)}/${fmtInt(v.uniqueIps)} source IP(s) OUTSIDE vendor ranges (${v.prefixes} prefixes) — treat claimed identity as spoofed`);
+      } else {
+        out.push(`${v.token.padEnd(22)} ${fmtInt(v.outside)}/${fmtInt(v.uniqueIps)} source IP(s) outside vendor ranges (${v.prefixes} prefixes) — MIXED identity, inspect closely`);
+      }
+      if (v.status === 'checked' && v.share < 1 && v.outsideSample.length > 0) {
+        out.push(`${' '.repeat(23)}outside IP sample: ${v.outsideSample.join(', ')}`);
+      }
+    }
+  }
+
   return out.join('\n');
+}
+
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+}
+
+export function renderCsv(report) {
+  const head = 'token,vendor,purpose,requests,bytes,hosts,distinctIps,days,peakRph,robotsTxtFetches';
+  const rows = report.byBot.map((b) =>
+    [b.token, b.vendor, b.purpose, b.requests, b.bytes, b.hosts, b.distinctIps, b.days, b.peakRph, b.robotsTxtFetches]
+      .map(csvEscape)
+      .join(','),
+  );
+  return [head, ...rows].join('\n');
 }
 
 // ---- CLI ------------------------------------------------------------------
@@ -376,25 +481,47 @@ Usage:
   crawlward [options] <access.log> [<more.log> ...]
 
 Options:
+  --verify        check claimed bot identities against vendors' published IP
+                  ranges (fetches a few small JSON files; needs network)
   --json          emit a machine-readable JSON report instead of tables
+  --csv           emit the per-bot table as CSV (overrides --json)
+  --since <date>  only events on/after this date (YYYY-MM-DD or ISO 8601)
+  --until <date>  only events up to this date (YYYY-MM-DD or ISO 8601)
   --top <n>       rows per table (default: 15)
   -h, --help      show this help
   -V, --version   show version
 
-Input: JSONL access logs from Caddy (log { format json }) or nginx
-(log_format ... escape=json). Plain and gzip-compressed (.gz) files work.
-Zero dependencies.`);
+Input: JSONL access logs from Caddy (log { format json }), nginx
+(log_format ... escape=json), or Apache combined format. Plain and
+gzip-compressed (.gz) files work. Zero dependencies.`);
+}
+
+// Accepts YYYY-MM-DD (UTC day start), full ISO 8601, or epoch seconds.
+function parseWhen(s) {
+  if (/^\d{9,13}$/.test(s)) return epochSeconds(Number(s));
+  const d = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T00:00:00Z` : s);
+  return Number.isNaN(d) ? null : d / 1000;
 }
 
 async function main() {
   const argv = process.argv.slice(2);
   let json = false;
+  let csv = false;
+  let verify = false;
   let top = 15;
+  let since = null;
+  let until = null;
   const files = [];
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--json') json = true;
+    else if (a === '--csv') csv = true;
+    else if (a === '--verify') verify = true;
+    else if (a === '--since') since = parseWhen(argv[++i] ?? '');
+    else if (a.startsWith('--since=')) since = parseWhen(a.slice(7));
+    else if (a === '--until') until = parseWhen(argv[++i] ?? '');
+    else if (a.startsWith('--until=')) until = parseWhen(a.slice(7));
     else if (a === '--top') top = Number(argv[++i]) || 15;
     else if (a.startsWith('--top=')) top = Number(a.slice(6)) || 15;
     else if (a === '-h' || a === '--help') { printHelp(); return; }
@@ -402,17 +529,33 @@ async function main() {
     else files.push(a);
   }
 
+  const askedSince = argv.some((a) => a === '--since' || a.startsWith('--since='));
+  const askedUntil = argv.some((a) => a === '--until' || a.startsWith('--until='));
+  if ((askedSince && since === null) || (askedUntil && until === null)) {
+    console.error('crawlward: could not parse --since/--until date');
+    process.exit(1);
+  }
   if (files.length === 0) {
     printHelp();
     process.exit(1);
   }
 
   const matchers = compileMatchers(loadRegistry());
-  const { stats, failed } = await analyzeFiles(files, matchers);
+  const { stats, failed } = await analyzeFiles(files, matchers, { since, until });
   const report = buildReport(stats, { top });
 
+  if (verify) {
+    const entries = [...stats.bots.values()]
+      .map((b) => {
+        const reg = matchers.find((m) => m.token === b.token);
+        return { token: b.token, ranges: reg?.ranges, ips: [...b.ips] };
+      });
+    report.verification = await verifyBots(entries);
+  }
+
   for (const f of failed) console.error(`crawlward: cannot read ${f.file}: ${f.error}`);
-  console.log(json ? JSON.stringify(report, null, 2) : renderReport(report, { top }));
+  const out = csv ? renderCsv(report) : json ? JSON.stringify(report, null, 2) : renderReport(report, { top });
+  console.log(out);
   if (failed.length > 0) process.exit(2);
 }
 
