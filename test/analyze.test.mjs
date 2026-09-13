@@ -127,10 +127,12 @@ test('ingestEvent aggregates requests, bytes, days and robots.txt fetches', () =
 
 test('non-registry bot-like UAs land in the unmatched bucket', () => {
   const stats = ingestFixtures(createStats());
-  const u = stats.unmatched.get('Scrapy/2.11 (+https://scrapy.org)');
-  assert.ok(u, 'Scrapy should be flagged as bot-like');
-  assert.equal(u.requests, 1);
-  assert.equal(stats.unmatched.get('Mozilla/5.0 (Macintosh) Chrome/126.0 Safari/537.36'), undefined);
+  const scrapy = [...stats.unmatched.values()].find((u) => u.display.startsWith('Scrapy'));
+  assert.ok(scrapy, 'Scrapy should be flagged as bot-like');
+  assert.equal(scrapy.requests, 1);
+  assert.equal(scrapy.hosts.size, 1);
+  const noBrowser = [...stats.unmatched.values()].find((u) => u.display.includes('Chrome/126'));
+  assert.equal(noBrowser, undefined); // plain browser UAs are not flagged
 });
 
 test('analyzeFiles reads plain and gzip JSONL, tolerating bad lines', async () => {
@@ -202,7 +204,7 @@ test('analyzeFiles auto-detects Apache combined logs alongside JSON', async () =
   // 2 CCBot lines + 1 DataForSeoBot (unmatched, bot-like)
   assert.equal(stats.parsed, 3);
   assert.equal(stats.aiRequests, 2);
-  assert.ok(stats.unmatched.get('DataForSeoBot/1.0'));
+  assert.ok([...stats.unmatched.values()].some((u) => u.display.startsWith('DataForSeoBot')));
 });
 
 test('peak request rate is computed per bot', () => {
@@ -237,4 +239,69 @@ test('renderCsv emits a header plus one row per bot', () => {
   assert.ok(lines[0].startsWith('token,vendor,purpose,requests'));
   assert.equal(lines.length, 6); // header + 5 bots
   assert.ok(lines.some((l) => l.startsWith('GPTBot,')));
+});
+
+test('undated events are excluded when --since/--until is active', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crawlward-test-'));
+  const f = join(dir, 'n.log');
+  const noTs = JSON.stringify({ req: { host: 'x', uri: '/', headers: { 'User-Agent': ['GPTBot'] } }, status: 200, size: 1 });
+  const dated = JSON.stringify({ ts: 1788739200, req: { host: 'x', uri: '/', headers: { 'User-Agent': ['GPTBot'] } }, status: 200, size: 1 });
+  writeFileSync(f, `${noTs}\n${dated}\n`);
+
+  const unfiltered = await analyzeFiles([f], matchers);
+  assert.equal(unfiltered.stats.aiRequests, 2); // undated counted when not filtering
+
+  const since = 1788739000;
+  const { stats } = await analyzeFiles([f], matchers, { since });
+  assert.equal(stats.aiRequests, 1); // only the dated event is provably in-window
+  assert.equal(stats.filtered, 1);
+});
+
+test('gzip content is detected by magic bytes, not file extension', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crawlward-test-'));
+  const disguised = join(dir, 'rotated-access.log'); // gzip bytes, .log name
+  writeFileSync(disguised, gzipSync(nginxFixture));
+  const { stats, failed } = await analyzeFiles([disguised], matchers);
+  assert.deepEqual(failed, []);
+  assert.equal(stats.aiRequests, 2); // both OAI-SearchBot lines parsed
+  assert.equal(stats.unparsed, 0);
+});
+
+test('unmatched bot-like UAs are version-normalized into one bucket', () => {
+  const stats = createStats();
+  const base = { host: 'h', uri: '/', status: 200, size: 1, remote: '' };
+  ingestEvent(stats, { ...base, ua: 'Scrapy/2.11 (+https://scrapy.org)' }, matchers);
+  ingestEvent(stats, { ...base, ua: 'Scrapy/2.12.1 (+https://scrapy.org)' }, matchers);
+  ingestEvent(stats, { ...base, ua: 'DataForSeoBot/1.0' }, matchers);
+  assert.equal(stats.unmatched.size, 2);
+  const scrapy = [...stats.unmatched.values()].find((u) => u.display.startsWith('Scrapy'));
+  assert.equal(scrapy.requests, 2);
+});
+
+test('peak hour beyond the first 5000 buckets is still counted', () => {
+  const stats = createStats();
+  const base = 1788739200; // epoch seconds
+  const ua = 'Mozilla/5.0 (compatible; GPTBot/1.2)';
+  // 1 request per hour for 6000 hours…
+  for (let h = 0; h < 6000; h++) {
+    ingestEvent(stats, { ts: base + h * 3600, host: 'h', uri: '/x', status: 200, size: 1, ua, remote: '' }, matchers);
+  }
+  // …then two requests inside hour #6001 (beyond the old 5000-bucket cap)
+  ingestEvent(stats, { ts: base + 6001 * 3600, host: 'h', uri: '/x', status: 200, size: 1, ua, remote: '' }, matchers);
+  ingestEvent(stats, { ts: base + 6001 * 3600 + 60, host: 'h', uri: '/x', status: 200, size: 1, ua, remote: '' }, matchers);
+  const report = buildReport(stats);
+  assert.equal(report.byBot[0].peakRph, 2);
+  assert.equal(report.byBot[0].requests, 6002);
+});
+
+test('verification with zero source IPs renders an explicit cannot-verify', async () => {
+  const { verifyBots } = await import('../src/verify.mjs');
+  const fakeFetch = async () => ({ ok: true, json: async () => ({ prefixes: [{ ipv4Prefix: '1.2.3.0/24' }] }) });
+  const stats = createStats();
+  ingestEvent(stats, { ts: 1788739200, host: 'x', uri: '/', status: 200, size: 1, ua: 'GPTBot', remote: '' }, matchers);
+  const report = buildReport(stats);
+  report.verification = await verifyBots([{ token: 'GPTBot', ranges: 'https://x.json', ips: [...stats.bots.get('GPTBot').ips] }], fakeFetch);
+  const text = renderReport(report);
+  assert.match(text, /no source IPs in these logs — cannot verify/);
+  assert.doesNotMatch(text, /MIXED identity/);
 });

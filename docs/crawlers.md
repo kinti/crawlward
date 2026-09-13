@@ -53,7 +53,8 @@ Google's crawler docs moved out of the Search Central tree (the old
 | Token | Purpose | Notes |
 |---|---|---|
 | `Applebot` | Siri/Spotlight; data may also train foundation models | honors robots.txt; no crawl-delay; reverse DNS `*.applebot.apple.com` |
-| `Applebot-Extended` | opt-out for foundation-model training | blocking it does not affect Siri/Spotlight |
+
+(`Applebot-Extended` is **not** a crawler — see [Control tokens](#control-tokens-never-appear-in-access-logs).)
 
 ### Amazon — <https://developer.amazon.com/amazonbot>
 
@@ -100,6 +101,31 @@ docs headings print them capitalized. crawlward matches case-insensitively.
 | Token | What it actually is |
 |---|---|
 | `Google-Extended` | A robots.txt-only control token. Google states it "has no independent HTTP request user-agent string" — you will **never** see it in your logs. It governs whether Googlebot-crawled content may train Gemini/Vertex models. Listing it in a "who crawls me" report is a classic mistake. |
+| `Applebot-Extended` | Same idea at Apple: a robots.txt-only token. Apple's page states "**Applebot-Extended does not crawl webpages**" and is "only used to determine how to use the data crawled by the Applebot user agent". It controls whether Applebot-crawled data trains Apple's foundation models. A request claiming this UA in your logs is, by definition, not Apple. |
+
+## Scope: what counts as an "AI crawler" here
+
+The registry tracks crawlers that exist *because of* AI (training, AI
+search, AI answer engines) plus dual-use crawlers whose vendor documents
+AI-model use. Two deliberate exclusions, and why:
+
+- **`Googlebot`** — it is a *search* crawler, but the traffic whose use it
+  governs includes Gemini/Vertex training (via the `Google-Extended`
+  robots.txt token, see above). We exclude it because classifying all
+  Googlebot traffic as "AI crawler" would swamp every report and mislead;
+  `GoogleOther` (unspecified product/research crawling) is the Google
+  entry that *is* distinctly AI-era. If you want Googlebot in your logs,
+  it is a plain UA token — grep for it directly.
+- **`Bingbot` (Microsoft)** — feeds Copilot/Bing search, but Microsoft
+  publishes no AI-training opt-out token and the crawler is search-first.
+  Same reasoning as Googlebot. If Microsoft ever ships a distinct
+  Copilot-training crawler UA, it belongs here.
+
+The line is judgment-based. `Applebot` is included because Apple documents
+that its crawled data may train foundation models, with a dedicated opt-out
+token. `omgili`/`VelenPublicWebCrawler` are included because their data
+feeds ML/AI products. Disagree with a call? That's exactly what PRs and the
+*crawler observation* issue template are for.
 
 ## Retired / gone
 

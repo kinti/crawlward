@@ -18,7 +18,7 @@ Caddy, nginx, cheap shared hosting — has no simple answer to:
 
 crawlward answers those from data you already have: your access logs.
 
-- **Classifies** requests from 39 known AI crawlers (GPTBot, ClaudeBot,
+- **Classifies** requests from 38 known AI crawlers (GPTBot, ClaudeBot,
   PerplexityBot, Bytespider, CCBot…) using a signature registry with
   sources in [`registry/crawlers.json`](registry/crawlers.json)
 - **Verifies identities** (`--verify`): checks that requests claiming to be
@@ -61,7 +61,7 @@ node src/analyze.mjs --since 2026-09-01 --verify /var/log/caddy/*.log
 ## Example output
 
 ```
-# crawlward v0.2.0 — who really crawls
+# crawlward v0.2.1 — who really crawls
 files: 3 · lines: 14 · parsed: 13 · unparsed: 1
 AI-crawler requests: 10 (76.9% of parsed) · 187 KB served
 
@@ -79,9 +79,11 @@ requests  share  served   days  peak/h  bot · vendor — purpose
 ## Identity verification (--verify: claimed identity vs vendor IP ranges)
 GPTBot                 1/1 source IP(s) OUTSIDE vendor ranges (21 prefixes) — treat claimed identity as spoofed
                        outside IP sample: 203.0.113.20
-CCBot                  all 1 source IP(s) inside vendor ranges (5 prefixes) — identity consistent
 Bytespider             vendor publishes no IP ranges — cannot verify
 ```
+
+(That output is real, from the test fixtures: their IPs are documentation
+ranges, so every verifiable bot correctly fails the vendor check.)
 
 ## 1. Turn on JSON access logs
 
@@ -124,9 +126,9 @@ claimed-bot requests against the vendor's own published IP prefix lists
 3. **Absence of evidence isn't evidence of absence.** Zero hits from a vendor
    doesn't mean zero crawling: content can reach models via Common Crawl or
    client-side aggregators.
-4. **`Google-Extended` will never appear in your logs.** It's a robots.txt
-   control token with no HTTP user-agent of its own. Any report claiming
-   "Google-Extended requests" is wrong.
+4. **`Google-Extended` and `Applebot-Extended` will never appear in your
+   logs.** They're robots.txt control tokens with no HTTP user-agent of
+   their own. Any report claiming requests from them is wrong.
 
 ## Roadmap
 
@@ -141,7 +143,7 @@ official documentation URL in the PR.
 
 ## Status
 
-v0.2.0 — young but tested (27 test cases, CI on Node 18/20/22). The
+v0.2.1 — young but tested (39 test cases, CI on Node 18/20/22). The
 signature registry is verified against vendor documentation as of
 September 2026; vendors rename and add bots often, so issues and PRs are
 the maintenance model.

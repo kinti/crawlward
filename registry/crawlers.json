@@ -1,7 +1,7 @@
 {
-  "$schema-note": "Machine-readable AI crawler registry consumed by src/analyze.mjs. Tokens are matched as case-insensitive substrings of the User-Agent. Every entry was checked against the vendor's official documentation on 2026-09-07 (field 'doc'); 'verified' marks whether an official vendor page exists. 'ranges' is the vendor's official IP-prefix list (Google-cloud-style {prefixes:[{ipv4Prefix|ipv6Prefix}]} shape) used by `crawlward --verify` to check that claimed identities come from vendor infrastructure. Human-readable annotated view: docs/crawlers.md",
-  "version": 3,
-  "updated": "2026-09-07",
+  "$schema-note": "Machine-readable AI crawler registry consumed by src/analyze.mjs. Tokens are matched as case-insensitive substrings of the User-Agent. Every entry was checked against the vendor's official documentation on 2026-09-07 (field 'doc'); 'verified' marks whether an official vendor page exists. 'ranges' is the vendor's official IP-prefix list (Google-cloud-style {prefixes:[{ipv4Prefix|ipv6Prefix}]} shape) used by `crawlward --verify` to check that claimed identities come from vendor infrastructure. 'controlTokens' lists robots.txt-only tokens that never appear in access logs and must NOT be treated as crawlers. Human-readable annotated view: docs/crawlers.md",
+  "version": 4,
+  "updated": "2026-09-14",
   "crawlers": [
     { "token": "GPTBot", "vendor": "OpenAI", "purpose": "model training", "doc": "https://developers.openai.com/api/docs/bots", "ranges": "https://openai.com/gptbot.json", "verified": true },
     { "token": "OAI-SearchBot", "vendor": "OpenAI", "purpose": "ChatGPT search index", "doc": "https://developers.openai.com/api/docs/bots", "ranges": "https://openai.com/searchbot.json", "verified": true },
@@ -21,7 +21,6 @@
     { "token": "Google-Read-Aloud", "vendor": "Google", "purpose": "text-to-speech read-aloud", "doc": "https://developers.google.com/crawling/docs/crawlers-fetchers/google-user-triggered-fetchers", "verified": true, "note": "user-triggered; generally ignores robots.txt" },
     { "token": "Google-Safety", "vendor": "Google", "purpose": "abuse/safety crawling", "doc": "https://developers.google.com/crawling/docs/crawlers-fetchers/google-special-case-crawlers", "verified": true, "note": "documented as ignoring robots.txt" },
     { "token": "Applebot", "vendor": "Apple", "purpose": "Siri/Spotlight; crawled data may train foundation models", "doc": "https://support.apple.com/en-us/119829", "verified": true },
-    { "token": "Applebot-Extended", "vendor": "Apple", "purpose": "training opt-out token (foundation models)", "doc": "https://support.apple.com/en-us/119829", "verified": true },
     { "token": "Amazonbot", "vendor": "Amazon", "purpose": "Alexa/services; may train Amazon AI models", "doc": "https://developer.amazon.com/amazonbot", "verified": true },
     { "token": "Amzn-SearchBot", "vendor": "Amazon", "purpose": "search (no generative-AI training)", "doc": "https://developer.amazon.com/amazonbot", "verified": true },
     { "token": "Amzn-User", "vendor": "Amazon", "purpose": "user-initiated fetch (Alexa)", "doc": "https://developer.amazon.com/amazonbot", "verified": true, "note": "may not follow all robots.txt directives" },
@@ -49,6 +48,12 @@
       "vendor": "Google",
       "doc": "https://developers.google.com/crawling/docs/crawlers-fetchers/google-common-crawlers",
       "note": "robots.txt-only control token: Google states it has NO independent HTTP user-agent string, so it never appears in access logs. It governs whether Googlebot-crawled content may train Gemini/Vertex models. Documented here to prevent a classic reporting mistake."
+    },
+    {
+      "token": "Applebot-Extended",
+      "vendor": "Apple",
+      "doc": "https://support.apple.com/en-us/119829",
+      "note": "robots.txt-only control token: Apple's page states 'Applebot-Extended does not crawl webpages' and 'is only used to determine how to use the data crawled by the Applebot user agent'. It governs whether Applebot-crawled data may train Apple's foundation models; any request claiming this UA in logs is not Apple."
     }
   ]
 }

@@ -4,13 +4,6 @@
 
 // ---- IP / CIDR math -------------------------------------------------------
 
-// Parse an IPv4 or IPv6 address into a BigInt. Returns null on invalid input.
-export function ipToBigInt(ip) {
-  if (typeof ip !== 'string' || !ip) return null;
-  if (ip.includes(':')) return ipv6ToBigInt(ip);
-  return ipv4ToBigInt(ip);
-}
-
 function ipv4ToBigInt(ip) {
   const parts = ip.split('.');
   if (parts.length !== 4) return null;
@@ -24,59 +17,78 @@ function ipv4ToBigInt(ip) {
   return n;
 }
 
-function ipv6ToBigInt(ip) {
-  // Handles canonical compressed form ("2600:1f28:365:8000::/56" addresses).
-  // IPv4-embedded endings (::ffff:1.2.3.4) are accepted.
-  let head = ip;
-  let tail = '';
-  const dc = ip.indexOf('::');
-  if (dc !== -1) {
-    head = ip.slice(0, dc);
-    tail = ip.slice(dc + 2);
-  }
-  const hextetsToBigInt = (s) => {
-    if (s === '') return [];
+// Splits an IPv6 string into 8 hextet groups. Handles `::` compression and
+// dotted-quad tails (::ffff:1.2.3.4, 64:ff9b::192.0.2.33, full form
+// 1:2:3:4:5:6:1.2.3.4). Returns null on anything invalid.
+function ipv6ToGroups(ip) {
+  const z = ip.indexOf('%'); // strip zone index (::1%eth0)
+  const s = z === -1 ? ip : ip.slice(0, z);
+  if (s.split('::').length > 2) return null; // only one `::` allowed
+
+  const dc = s.indexOf('::');
+  const head = dc === -1 ? s : s.slice(0, dc);
+  const tail = dc === -1 ? '' : s.slice(dc + 2);
+
+  const parsePiece = (piece) => {
+    if (piece === '') return [];
     const out = [];
-    for (const g of s.split(':')) {
-      if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
-      out.push(BigInt(parseInt(g, 16)));
+    const parts = piece.split(':');
+    for (let i = 0; i < parts.length; i++) {
+      const g = parts[i];
+      if (g.includes('.')) {
+        // dotted quad is only valid as the last group of a piece
+        if (i !== parts.length - 1) return null;
+        const v4 = ipv4ToBigInt(g);
+        if (v4 === null) return null;
+        out.push((v4 >> 16n) & 0xffffn, v4 & 0xffffn);
+      } else if (/^[0-9a-fA-F]{1,4}$/.test(g)) {
+        out.push(BigInt(parseInt(g, 16)));
+      } else {
+        return null;
+      }
     }
     return out;
   };
-  let groups = hextetsToBigInt(head);
-  if (groups === null) return null;
-  const tailGroups = hextetsToBigInt(tail);
-  if (tailGroups === null) return null;
+
+  const h = parsePiece(head);
+  if (h === null) return null;
+  const t = parsePiece(tail);
+  if (t === null) return null;
 
   if (dc === -1) {
-    if (groups.length !== 8) return null;
-  } else {
-    // An IPv4-embedded tail is written as one group per hextet already, or
-    // as dotted quad — normalize the dotted case first.
-    if (tail.includes('.')) {
-      const v4 = ipv4ToBigInt(tail);
-      if (v4 === null) return null;
-      const hi = (v4 >> 16n) & 0xffffn;
-      const lo = v4 & 0xffffn;
-      const replaced = tail === '' ? [] : [hi, lo];
-      tailGroups.splice(0, tailGroups.length, ...replaced);
-    }
-    if (groups.length + tailGroups.length > 7) return null;
-    const fill = 8 - (groups.length + tailGroups.length);
-    groups = [...groups, ...Array(fill).fill(0n), ...tailGroups];
+    if (h.length !== 8) return null;
+    return h;
   }
+  if (h.length + t.length > 7) return null;
+  const fill = 8 - h.length - t.length;
+  return [...h, ...Array(fill).fill(0n), ...t];
+}
 
-  // Last group may still be a dotted quad in full form, e.g. 1:2:3:4:5:6:1.2.3.4
-  if (groups.length === 6 && ip.includes('.') && dc === -1) {
-    const last = ip.split(':').pop();
-    const v4 = ipv4ToBigInt(last);
-    if (v4 === null) return null;
-    groups = groups.slice(0, 5).concat([(v4 >> 16n) & 0xffffn, v4 & 0xffffn]);
+// Parses an IPv4 or IPv6 address into { value: BigInt, family: 4|6 }.
+// IPv4-mapped IPv6 (::ffff:0:0/96 — how nginx dual-stack logs IPv4 clients)
+// canonicalizes onto the embedded IPv4 so vendor v4 ranges match.
+export function parseIp(ip) {
+  if (typeof ip !== 'string' || !ip) return null;
+  if (!ip.includes(':')) {
+    const v = ipv4ToBigInt(ip);
+    return v === null ? null : { value: v, family: 4 };
   }
-
+  const groups = ipv6ToGroups(ip);
+  if (groups === null) return null;
+  const isMapped =
+    groups.slice(0, 5).every((g) => g === 0n) && groups[5] === 0xffffn;
+  if (isMapped) {
+    return { value: (groups[6] << 16n) | groups[7], family: 4 };
+  }
   let n = 0n;
   for (const g of groups) n = (n << 16n) | g;
-  return n;
+  return { value: n, family: 6 };
+}
+
+// Legacy helper kept for API stability: returns just the numeric value.
+export function ipToBigInt(ip) {
+  const p = parseIp(ip);
+  return p === null ? null : p.value;
 }
 
 export function parseCidr(cidr) {
@@ -115,11 +127,28 @@ export function buildRangeSet(prefixes) {
   return { v4, v6 };
 }
 
-export function ipInSet(ipBig, set) {
-  if (ipBig === null || !set) return false;
-  const table = set.v4; // pick family by magnitude is wrong for v4-mapped; try both
-  for (const p of table) if (sameNetwork(ipBig, p)) return true;
-  for (const p of set.v6) if (sameNetwork(ipBig, p)) return true;
+// Accepts a string address (preferred — family-aware, canonicalizes
+// v4-mapped IPv6), a parseIp() result, or a legacy bare BigInt (family
+// unknown in that form, so both tables are tried).
+export function ipInSet(ip, set) {
+  if (!set) return false;
+  let value;
+  let family;
+  if (typeof ip === 'string') {
+    const p = parseIp(ip);
+    if (!p) return false;
+    ({ value, family } = p);
+  } else if (ip && typeof ip === 'object' && typeof ip.value === 'bigint') {
+    ({ value, family } = ip);
+  } else if (typeof ip === 'bigint') {
+    for (const p of set.v4) if (sameNetwork(ip, p)) return true;
+    for (const p of set.v6) if (sameNetwork(ip, p)) return true;
+    return false;
+  } else {
+    return false;
+  }
+  const table = family === 4 ? set.v4 : set.v6;
+  for (const p of table) if (sameNetwork(value, p)) return true;
   return false;
 }
 
@@ -187,7 +216,7 @@ export async function verifyBots(entries, fetchImpl = fetch) {
     let inside = 0;
     const outsideIps = new Set();
     for (const ip of e.ips) {
-      if (ipInSet(ipToBigInt(ip), set)) inside++;
+      if (ipInSet(ip, set)) inside++;
       else outsideIps.add(ip);
     }
     results.push({

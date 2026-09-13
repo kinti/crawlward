@@ -8,7 +8,7 @@ contributions that matter most here: **registry corrections** and **code**.
 ```sh
 git clone https://github.com/kinti/crawlward.git
 cd crawlward
-npm test          # 14 tests, node:test, zero dependencies to install
+npm test          # full suite (node:test) — zero dependencies to install
 ```
 
 Requirements: Node ≥ 18. No `npm install` — the project has zero runtime

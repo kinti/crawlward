@@ -4,16 +4,21 @@
 // nginx `log_format ... escape=json`) and Apache combined logs.
 // Zero dependencies. Node >= 18.
 
-import { createReadStream, readFileSync } from 'node:fs';
+import { createReadStream, readFileSync, openSync, readSync, closeSync } from 'node:fs';
 import { createGunzip } from 'node:zlib';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { verifyBots } from './verify.mjs';
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const REGISTRY_URL = new URL('../registry/crawlers.json', import.meta.url);
 const BOTLIKE = /(bot|crawler|spider|slurp|scrap|fetcher)/i;
 const MAX_TRACKED_PATHS = 5000;
+// Hours are timestamp-derived, not attacker-controlled, but a garbage or
+// years-long log can still flood the map — bound it well above any sane
+// timespan (100k buckets ≈ 11 years) so peak-rate math stays truthful.
+const MAX_TRACKED_HOURS = 100000;
+const MAX_UNMATCHED_UAS = 20000;
 
 export function loadRegistry() {
   const raw = JSON.parse(readFileSync(REGISTRY_URL, 'utf8'));
@@ -176,8 +181,8 @@ function dayOf(ts) {
   return new Date(ts * 1000).toISOString().slice(0, 10);
 }
 
-function addBounded(map, key) {
-  if (map.has(key) || map.size < MAX_TRACKED_PATHS) {
+function addBounded(map, key, cap) {
+  if (map.has(key) || map.size < cap) {
     map.set(key, (map.get(key) ?? 0) + 1);
   }
 }
@@ -186,14 +191,22 @@ function addIp(set, ip) {
   if (ip && (set.has(ip) || set.size < 50000)) set.add(ip);
 }
 
+// Merge version-suffixed UAs (Scrapy/2.11, Scrapy/2.12) into one bucket per
+// product so the unmatched table isn't fragmented across releases.
+function unmatchedKey(ua) {
+  return ua.replace(/\/\d[\w.-]*/g, '/*');
+}
+
 export function ingestEvent(stats, ev, matchers) {
   const c = classifyUA(ev.ua, matchers);
   if (!c) {
     if (ev.ua && BOTLIKE.test(ev.ua)) {
-      let u = stats.unmatched.get(ev.ua);
+      const key = unmatchedKey(ev.ua);
+      let u = stats.unmatched.get(key);
       if (!u) {
-        u = { requests: 0, hosts: new Set() };
-        stats.unmatched.set(ev.ua, u);
+        if (stats.unmatched.size >= MAX_UNMATCHED_UAS) return false;
+        u = { display: ev.ua, requests: 0, hosts: new Set() };
+        stats.unmatched.set(key, u);
       }
       u.requests++;
       if (ev.host) u.hosts.add(ev.host);
@@ -228,7 +241,7 @@ export function ingestEvent(stats, ev, matchers) {
   if (ev.remote) addIp(b.ips, ev.remote);
   if (ev.ts) {
     b.days.add(dayOf(ev.ts));
-    addBounded(b.hours, Math.floor(ev.ts / 3600));
+    addBounded(b.hours, Math.floor(ev.ts / 3600), MAX_TRACKED_HOURS);
   }
   const st = ev.status ?? 'n/a';
   b.statuses.set(st, (b.statuses.get(st) ?? 0) + 1);
@@ -237,15 +250,34 @@ export function ingestEvent(stats, ev, matchers) {
   return true;
 }
 
+// Sniff the gzip magic bytes instead of trusting the file extension —
+// rotated logs get renamed, and misclassifying gzip as text turns every
+// line into "unparsed".
+function isGzipFile(path) {
+  let fd;
+  try {
+    fd = openSync(path, 'r');
+    const buf = Buffer.alloc(2);
+    return readSync(fd, buf, 0, 2, 0) === 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
 async function* jsonLines(path) {
   const input = createReadStream(path);
-  const stream = path.endsWith('.gz') ? input.pipe(createGunzip()) : input;
+  const stream = isGzipFile(path) ? input.pipe(createGunzip()) : input;
   const rl = createInterface({ input: stream, crlfDelay: Infinity });
   for await (const line of rl) yield line;
 }
 
 export async function analyzeFiles(files, matchers, opts = {}) {
   const { stats = createStats(), since = null, until = null } = opts;
+  const filtering = since !== null || until !== null;
   const failed = [];
   for (const f of files) {
     stats.files++;
@@ -263,9 +295,13 @@ export async function analyzeFiles(files, matchers, opts = {}) {
           stats.unparsed++;
           continue;
         }
-        if (ev.ts !== null) {
-          if (since !== null && ev.ts < since) { stats.filtered++; continue; }
-          if (until !== null && ev.ts > until) { stats.filtered++; continue; }
+        if (filtering) {
+          // An undated event can't be placed in the window; when the user
+          // asks for a window we exclude it rather than guess.
+          if (ev.ts === null || (since !== null && ev.ts < since) || (until !== null && ev.ts > until)) {
+            stats.filtered++;
+            continue;
+          }
         }
         stats.parsed++;
         ingestEvent(stats, ev, matchers);
@@ -369,7 +405,7 @@ export function buildReport(stats, { top = 15 } = {}) {
     unmatchedBots: [...stats.unmatched.entries()]
       .sort((a, z) => z[1].requests - a[1].requests)
       .slice(0, top)
-      .map(([ua, u]) => ({ ua, requests: u.requests, hosts: u.hosts.size })),
+      .map(([, u]) => ({ ua: u.display, requests: u.requests, hosts: u.hosts.size })),
   };
 }
 
@@ -441,6 +477,8 @@ export function renderReport(report, { top = 15 } = {}) {
         out.push(`${v.token.padEnd(22)} vendor publishes no IP ranges — cannot verify`);
       } else if (v.status === 'unavailable') {
         out.push(`${v.token.padEnd(22)} ranges unavailable (${v.error})`);
+      } else if (v.uniqueIps === 0) {
+        out.push(`${v.token.padEnd(22)} no source IPs in these logs — cannot verify (log remote_addr / remote_ip)`);
       } else if (v.share === 1) {
         out.push(`${v.token.padEnd(22)} all ${fmtInt(v.uniqueIps)} source IP(s) inside vendor ranges (${v.prefixes} prefixes) — identity consistent`);
       } else if (v.share === 0) {
@@ -485,15 +523,18 @@ Options:
                   ranges (fetches a few small JSON files; needs network)
   --json          emit a machine-readable JSON report instead of tables
   --csv           emit the per-bot table as CSV (overrides --json)
-  --since <date>  only events on/after this date (YYYY-MM-DD or ISO 8601)
-  --until <date>  only events up to this date (YYYY-MM-DD or ISO 8601)
+  --since <date>  only events on/after this date (YYYY-MM-DD is read as
+                  UTC midnight; full ISO 8601 also works)
+  --until <date>  only events up to this date (same format as --since).
+                  Events without a timestamp are excluded while filtering.
   --top <n>       rows per table (default: 15)
   -h, --help      show this help
   -V, --version   show version
 
 Input: JSONL access logs from Caddy (log { format json }), nginx
-(log_format ... escape=json), or Apache combined format. Plain and
-gzip-compressed (.gz) files work. Zero dependencies.`);
+(log_format ... escape=json), or Apache combined format. gzip is detected
+by content, so compressed rotations work under any filename.
+Zero dependencies.`);
 }
 
 // Accepts YYYY-MM-DD (UTC day start), full ISO 8601, or epoch seconds.

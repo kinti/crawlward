@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  parseIp,
   ipToBigInt,
   parseCidr,
   ipInCidr,
@@ -19,6 +20,47 @@ test('ipToBigInt parses IPv4 and IPv6', () => {
   assert.equal(ipToBigInt('not-an-ip'), null);
   assert.equal(ipToBigInt('999.1.1.1'), null);
   assert.equal(ipToBigInt(''), null);
+});
+
+test('parseIp canonicalizes v4-mapped IPv6 onto the IPv4 table (nginx dual-stack)', () => {
+  const mapped = parseIp('::ffff:203.0.113.5');
+  assert.equal(mapped.family, 4);
+  assert.equal(mapped.value, ipToBigInt('203.0.113.5'));
+  // This is the representation nginx writes with ipv6only=off — it must
+  // match the vendor's plain IPv4 prefixes.
+  const set = buildRangeSet(['203.0.113.0/24']);
+  assert.equal(ipInSet('::ffff:203.0.113.5', set), true);
+  assert.equal(ipInSet('::ffff:203.0.114.5', set), false);
+});
+
+test('parseIp handles NAT64, zone indexes, full-form dotted quads, invalid forms', () => {
+  // NAT64 (mobile carriers): family 6, not v4-mapped
+  const nat64 = parseIp('64:ff9b::192.0.2.33');
+  assert.equal(nat64.family, 6);
+  assert.equal(nat64.value, BigInt('0x0064ff9b0000000000000000c0000221'));
+
+  // zone index stripped
+  assert.equal(parseIp('fe80::1%eth0').value, parseIp('fe80::1').value);
+
+  // full form with dotted quad (no :: compression)
+  const full = parseIp('1:2:3:4:5:6:192.0.2.1');
+  assert.equal(full.family, 6);
+  assert.equal(full.value, parseIp('1:2:3:4:5:6:c000:201').value);
+
+  assert.equal(parseIp('1::2::3'), null); // two '::'
+  assert.equal(parseIp('::ffff:300.1.2.3'), null); // bad embedded v4
+  assert.equal(parseIp('1:2:3:4:5:6:7:8:9'), null); // too many groups
+});
+
+test('ipInSet stays family-aware for strings and tolerant for legacy bigints', () => {
+  const set = buildRangeSet(['203.0.113.0/24', '2600:1f28:365:8000::/56']);
+  assert.equal(ipInSet('203.0.113.9', set), true);
+  assert.equal(ipInSet('2600:1f28:365:8000::1', set), true);
+  assert.equal(ipInSet('2600:dead::1', set), false);
+  assert.equal(ipInSet(null, set), false);
+  // legacy bigint path (family unknown) — must still find a match
+  assert.equal(ipInSet(ipToBigInt('203.0.113.9'), set), true);
+  assert.equal(ipInSet(ipToBigInt('2600:1f28:365:8000::1'), set), true);
 });
 
 test('parseCidr handles bare addresses and invalid bits', () => {

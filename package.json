@@ -1,6 +1,6 @@
 {
   "name": "crawlward",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Watchdog for AI crawlers at your own origin — access-log analyzer for Caddy/nginx.",
   "type": "module",
   "bin": { "crawlward": "src/analyze.mjs" },
