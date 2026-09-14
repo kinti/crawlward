@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-label="crawlward — a watchdog for AI crawlers at your own origin">
+  <title>crawlward — a watchdog for AI crawlers at your own origin</title>
+  <defs>
+    <radialGradient id="sweep" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#238636" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#238636" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="360" fill="#0d1117"/>
+  <rect x="0" y="356" width="1280" height="4" fill="#238636"/>
+
+  <!-- radar -->
+  <g stroke="#238636" fill="none">
+    <circle cx="1040" cy="180" r="40" stroke-opacity="0.85"/>
+    <circle cx="1040" cy="180" r="80" stroke-opacity="0.5"/>
+    <circle cx="1040" cy="180" r="120" stroke-opacity="0.28"/>
+    <circle cx="1040" cy="180" r="158" stroke-opacity="0.14"/>
+    <line x1="882" y1="180" x2="1198" y2="180" stroke-opacity="0.2"/>
+    <line x1="1040" y1="22" x2="1040" y2="338" stroke-opacity="0.2"/>
+  </g>
+  <path d="M1040 180 L1040 60 A120 120 0 0 1 1135 125 Z" fill="url(#sweep)"/>
+
+  <!-- blips: what the report classifies -->
+  <circle cx="1086" cy="118" r="6" fill="#3fb950"/>
+  <circle cx="1086" cy="118" r="11" fill="none" stroke="#3fb950" stroke-opacity="0.4"/>
+  <circle cx="985" cy="236" r="5" fill="#d29922"/>
+  <circle cx="985" cy="236" r="10" fill="none" stroke="#d29922" stroke-opacity="0.4"/>
+  <circle cx="1128" cy="222" r="5" fill="#f85149"/>
+  <circle cx="1128" cy="222" r="10" fill="none" stroke="#f85149" stroke-opacity="0.4"/>
+
+  <!-- wordmark -->
+  <text x="76" y="168" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="78" font-weight="700" fill="#e6edf3">crawl<tspan fill="#3fb950">ward</tspan></text>
+  <text x="82" y="216" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="25" fill="#8b949e">a watchdog for AI crawlers at your own origin</text>
+  <text x="82" y="252" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" fill="#6e7681">caddy · nginx · apache — zero dependencies — node &gt;= 18</text>
+
+  <!-- legend -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" fill="#8b949e">
+    <circle cx="90" cy="308" r="5" fill="#3fb950"/>
+    <text x="104" y="313">verified</text>
+    <circle cx="212" cy="308" r="5" fill="#d29922"/>
+    <text x="226" y="313">unmatched</text>
+    <circle cx="346" cy="308" r="5" fill="#f85149"/>
+    <text x="360" y="313">spoofed</text>
+  </g>
+</svg>

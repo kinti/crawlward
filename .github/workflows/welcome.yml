@@ -1,0 +1,29 @@
+name: Welcome
+
+# Greets first-time contributors once; the messages point at the docs that
+# make a first contribution easy (registry rules live in CONTRIBUTING.md).
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/first-interaction@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-message: |
+            Thanks for opening your first issue here! 🐕
+            If it's a crawler observation, the more exact the User-Agent string, the better.
+            Registry additions need the vendor's official doc URL — see [CONTRIBUTING](https://github.com/kinti/crawlward/blob/main/.github/CONTRIBUTING.md).
+          pr-message: |
+            Thanks for your first PR! 🐕
+            Quick checklist: `npm test` green, registry changes cite the vendor's official docs,
+            and `docs/crawlers.md` stays in sync with `registry/crawlers.json`.

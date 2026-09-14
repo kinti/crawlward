@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If crawlward helps you understand who really crawls your site, consider citing it."
+title: crawlward
+authors:
+  - family-names: Quintana
+    given-names: Jesús
+type: software
+license: MIT
+repository-code: "https://github.com/kinti/crawlward"
+url: "https://github.com/kinti/crawlward"
+abstract: >-
+  A watchdog for AI crawlers at your own origin. crawlward classifies AI
+  crawler traffic from Caddy, nginx and Apache access logs, verifies
+  claimed identities against vendor-published IP ranges, and reports who
+  really crawls — with zero dependencies.
+keywords:
+  - ai-crawlers
+  - access-logs
+  - robots-txt
+  - caddy
+  - nginx
+  - log-analyzer

@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # crawlward itself has zero runtime dependencies; the only moving parts
+  # to keep current are the GitHub Actions used by CI.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci:"
+    labels:
+      - dependencies

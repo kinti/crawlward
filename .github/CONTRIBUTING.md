@@ -57,5 +57,6 @@ point of the project. Redact any data that isn't yours to share.
 
 ## Releases
 
-Maintainer-only: bump `version` in `package.json`, tag `vX.Y.Z`, push the
-tag, and publish a GitHub Release with notes.
+Maintainer-only: bump `version` in `package.json`, add the entry to
+`CHANGELOG.md`, tag `vX.Y.Z`, push the tag, and publish a GitHub Release
+with notes. The project follows [Semantic Versioning](https://semver.org/).

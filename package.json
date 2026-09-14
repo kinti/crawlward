@@ -14,6 +14,7 @@
     "docs",
     "caddy",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "keywords": [
@@ -34,5 +35,9 @@
     "url": "git+https://github.com/kinti/crawlward.git"
   },
   "bugs": "https://github.com/kinti/crawlward/issues",
-  "homepage": "https://github.com/kinti/crawlward#readme"
+  "homepage": "https://github.com/kinti/crawlward#readme",
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/kinti"
+  }
 }
