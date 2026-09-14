@@ -2,11 +2,21 @@ version: 2
 updates:
   # crawlward itself has zero runtime dependencies; the only moving parts
   # to keep current are the GitHub Actions used by CI.
+  #
+  # All actions are grouped into a single weekly PR. Without the group,
+  # Dependabot opens one PR per action and separate PRs touching the same
+  # workflow files conflict with each other (observed: setup-node and
+  # codeql-action PRs colliding on ci.yml).
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
     commit-message:
       prefix: "ci:"
     labels:
       - dependencies
+    open-pull-requests-limit: 5
